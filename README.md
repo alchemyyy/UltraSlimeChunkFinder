@@ -10,6 +10,13 @@ slime.cu searches ~16000 positions per second (across all seeds at each position
 
 I think big slime chunks are very satisfying, so I built a set of utilities to search for them.
 
+TODO: 
+ * Z has consistently been exhibiting periodicity
+ * GPU batching is now required (k-stride made things a lot more efficient than they used to be)
+ * Finish adding "scaling" to slime.cu. right now it is only confirmed working for 4x4's.
+ * Investigate universal pattern possibility with hensel + k stride algo.
+
+
 ## Build
 
 Requires CUDA Toolkit and Visual Studio.
