@@ -2,7 +2,9 @@
 
 GPU-accelerated Minecraft slime chunk pattern finder.
 
-<img width="200" height="200" alt="image" src="https://github.com/user-attachments/assets/fe0e5c4c-8d1b-413c-bd56-9b5f1336d3d1" />
+<img width="350" height="350" alt="image" src="https://github.com/user-attachments/assets/1f8b3ef6-5d4d-4060-9897-77f9d111217f" />
+
+https://www.chunkbase.com/apps/slime-finder#seed=100103745034619&platform=java&x=54483&z=96957&zoom=1.281
 
 In terms of "raw probability", the odds of an N by N brick of slime chunks is 1/(10^(N^2)). For N=4 (example above), this is 1 in 10 quadrillion.
 
