@@ -42,8 +42,8 @@ constexpr int32_t SLIME_B = 0x5ac0db;
 constexpr int64_t SLIME_C = 0x4307a7LL;
 constexpr int32_t SLIME_D = 0x5f24f;
 
-// Pattern size
-constexpr int PATTERN_SIZE = 4;
+// Pattern size - use #define for preprocessor conditionals
+#define PATTERN_SIZE 5
 constexpr int NUM_CONSTRAINTS = PATTERN_SIZE * PATTERN_SIZE;
 
 // ============================================================================
@@ -96,18 +96,20 @@ constexpr int REFINE_BITS = 32;  // Lift roots to this many bits to filter dead 
 // K-SPACE STRIDE OPTIMIZATION
 // ============================================================================
 // Mathematical discovery: For any position, valid k values (upper bits) satisfy:
-//   k ≡ offset (mod 2^14) for some offset in [0, 16384)
+//   k ≡ offset (mod 2^K_STRIDE_BITS) for some offset in [0, K_STRIDE)
 //
 // This is because residue deltas when incrementing k by 1 are always even
 // (due to bit alignment in the LCG formula), and the mod-5 constraint system
-// has period 2^14 in k-space.
+// has period 2^(ROOT_BITS - 7) in k-space.
 //
-// This allows a 16384x speedup:
-// - Phase 1: Scan k ∈ [0, 16384) to find valid offset (or determine root is false)
-// - Phase 2: Enumerate k = offset + n*16384 for n = 0,1,2,...,8191
-constexpr int K_STRIDE_BITS = 14;
-constexpr uint64_t K_STRIDE = 1ULL << K_STRIDE_BITS;  // 16384
-constexpr uint64_t K_STRIDE_COUNT = UPPER_COUNT / K_STRIDE;  // 8192 for 4x4
+// Formula: K_STRIDE_BITS = ROOT_BITS - 7
+//
+// This allows a K_STRIDE-fold speedup:
+// - Phase 1: Scan k ∈ [0, K_STRIDE) to find valid offset (or determine root is false)
+// - Phase 2: Enumerate k = offset + n*K_STRIDE for all valid n
+constexpr int K_STRIDE_BITS = ROOT_BITS - 7;  // Derived from ROOT_BITS
+constexpr uint64_t K_STRIDE = 1ULL << K_STRIDE_BITS;
+constexpr uint64_t K_STRIDE_COUNT = UPPER_COUNT / K_STRIDE;
 
 constexpr uint32_t MAX_ROOTS = 1U << 24;  // 16M max roots (realistically <<1000, but costs only 128MB)
 constexpr uint32_t MAX_CANDIDATES = 1U << 24;  // 16M for intermediate Hensel steps
@@ -404,15 +406,15 @@ __global__ void findKOffsetKernel(
 ) {
     uint64_t idx = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
     uint64_t totalWork = (uint64_t)numRoots * K_STRIDE;
-    
+
     if (idx >= totalWork) return;
-    
+
     uint32_t rootIdx = idx / K_STRIDE;
     uint64_t k = idx % K_STRIDE;
-    
+
     uint64_t root = roots[rootIdx];
     uint64_t seed = root | (k << ROOT_BITS);
-    
+
     if (checkPattern(seed, baseX, baseZ)) {
         // Found a valid k! Use atomicMin to keep the smallest
         atomicMin((unsigned long long*)&kOffsets[rootIdx], (unsigned long long)k);
@@ -434,26 +436,26 @@ __global__ void enumerateWithKStrideKernel(
 ) {
     uint64_t idx = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
     uint64_t totalWork = (uint64_t)numRoots * K_STRIDE_COUNT;
-    
+
     if (idx >= totalWork) return;
-    
+
     uint32_t rootIdx = idx / K_STRIDE_COUNT;
     uint64_t strideMultiple = idx % K_STRIDE_COUNT;
-    
+
     // Skip roots that have no valid k
     if (!hasValidK[rootIdx]) return;
-    
+
     uint64_t root = roots[rootIdx];
     uint64_t kOffset = kOffsets[rootIdx];
-    
+
     // k = kOffset + strideMultiple * K_STRIDE
     uint64_t k = kOffset + strideMultiple * K_STRIDE;
-    
+
     // Check bounds
     if (k >= UPPER_COUNT) return;
-    
+
     uint64_t seed = root | (k << ROOT_BITS);
-    
+
     if (checkPattern(seed, baseX, baseZ)) {
         uint32_t pos = atomicAdd(resultCount, 1);
         if (pos < maxResults) {
@@ -845,8 +847,8 @@ public:
 
     // ========================================================================
     // OPTIMIZED: Two-phase k-stride enumeration
-    // Uses the mathematical property that valid k ≡ offset (mod 2^14)
-    // This gives ~16384x speedup over brute force enumeration
+    // Uses the mathematical property that valid k ≡ offset (mod K_STRIDE)
+    // This gives ~K_STRIDE-fold speedup over brute force enumeration
     // ========================================================================
     uint64_t searchPositionOptimized(int32_t baseX, int32_t baseZ) {
         computePositionTerms(baseX, baseZ);
@@ -869,7 +871,7 @@ public:
         {
             uint64_t totalWork = (uint64_t)numRoots * K_STRIDE;
             uint64_t blocks = (totalWork + threads - 1) / threads;
-            
+
             // Limit blocks to avoid launch failure
             constexpr uint64_t MAX_BLOCKS = 1ULL << 24;
             if (blocks > MAX_BLOCKS) {
@@ -877,12 +879,12 @@ public:
                 for (uint64_t start = 0; start < totalWork; start += MAX_BLOCKS * threads) {
                     uint64_t batchWork = std::min((uint64_t)(MAX_BLOCKS * threads), totalWork - start);
                     uint64_t batchBlocks = (batchWork + threads - 1) / threads;
-                    
+
                     // Note: Need a modified kernel that takes a work offset
                     // For simplicity, use single launch if possible
                 }
             }
-            
+
             findKOffsetKernel<<<(uint32_t)std::min(blocks, MAX_BLOCKS), threads>>>(
                 d_roots, numRoots, baseX, baseZ,
                 d_kOffsets, d_hasValidK
@@ -893,7 +895,7 @@ public:
         // Check how many roots have valid k
         std::vector<uint32_t> h_hasValidK(numRoots);
         cudaMemcpy(h_hasValidK.data(), d_hasValidK, numRoots * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-        
+
         uint32_t numValidRoots = 0;
         for (uint32_t i = 0; i < numRoots; i++) {
             if (h_hasValidK[i]) numValidRoots++;
@@ -1230,7 +1232,7 @@ public:
         }
 
         while (unlimited || spiral.radius() <= maxRadius) {
-            // Use optimized k-stride enumeration (16384x faster than brute force)
+            // Use optimized k-stride enumeration (K_STRIDE-fold faster than brute force)
             uint64_t found = searchPositionOptimized(spiral.x, spiral.z);
 
             totalResultsFound += found;
@@ -1326,9 +1328,15 @@ int runTest() {
     // Hand-verified test cases
     struct TestCase { int32_t x, z; uint64_t seed; bool expected_valid; };
     TestCase tests[] = {
+#if PATTERN_SIZE == 4
         {517, -112, 108601225683165ULL, false},  // Erroneous - not a real 4x4
         {169, 517, 3915317495438ULL, false},     // Erroneous - not a real 4x4
         {64, 333, 98429062619012ULL, true},      // Real - verified 4x4
+#elif PATTERN_SIZE == 5
+        {51069, 419124, 61692151016558ULL, true},  // Real - verified 5x5
+#else
+        // No test cases for this pattern size
+#endif
     };
 
     for (const auto& tc : tests) {
@@ -1345,17 +1353,25 @@ int runTest() {
     }
 
     // ========================================
-    // Test: Search from ~3 rings before (64, 333)
+    // Test: Search from ~3 rings before target position
     // ========================================
-    printf("\n--- Test: Search starting ~3 rings before (64, 333) ---\n");
-
-    // We want to start at a position such that (64, 333) is about 3 rings away
-    // If we start at (64-3, 333-3) = (61, 330), the target is at relative (3, 3) = radius 3
+#if PATTERN_SIZE == 4
     int32_t targetX = 64, targetZ = 333;
-    int32_t offsetX = 61, offsetZ = 330;  // Start position (target will be ~3 rings away)
+    uint64_t knownSeed = 98429062619012ULL;
+#elif PATTERN_SIZE == 5
+    int32_t targetX = 51069, targetZ = 419124;
+    uint64_t knownSeed = 61692151016558ULL;
+#else
+    // Skip search test for unknown pattern sizes
+    printf("\nNo search test configured for %dx%d pattern.\n", PATTERN_SIZE, PATTERN_SIZE);
+    printf("\nTest complete.\n");
+    return 0;
+#endif
 
-    // The target relative to our start is (targetX - offsetX, targetZ - offsetZ) = (3, 3)
-    // In spiral coordinates, (3, 3) has radius max(3, 3) = 3
+    printf("\n--- Test: Search starting ~3 rings before (%d, %d) ---\n", targetX, targetZ);
+
+    int32_t offsetX = targetX - 3, offsetZ = targetZ - 3;
+
     int32_t relTargetX = targetX - offsetX;
     int32_t relTargetZ = targetZ - offsetZ;
     int32_t expectedRadius = std::max(std::abs(relTargetX), std::abs(relTargetZ));
@@ -1364,14 +1380,11 @@ int runTest() {
     printf("Search origin: (%d, %d)\n", offsetX, offsetZ);
     printf("Target relative to origin: (%d, %d) at radius %d\n", relTargetX, relTargetZ, expectedRadius);
 
-    // Use spiral but offset all coordinates
     SpiralIterator spiral;
     int32_t searchStartX = offsetX + spiral.x;
     int32_t searchStartZ = offsetZ + spiral.z;
     printf("Search starting position: (%d, %d)\n", searchStartX, searchStartZ);
 
-    // Create a temporary searcher that doesn't write to the main results file
-    // We'll manually search until we hit the target position
     OptimizedHenselSlimeSearcher searcher;
 
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -1380,7 +1393,6 @@ int runTest() {
     bool foundTarget = false;
     uint64_t targetSeeds = 0;
 
-    // Continue spiral from origin, offset all coordinates
     while (spiral.radius() <= expectedRadius + 1) {
         int32_t currentX = offsetX + spiral.x;
         int32_t currentZ = offsetZ + spiral.z;
@@ -1414,16 +1426,14 @@ int runTest() {
     printf("  Rate: %.1f positions/second\n", positionsSearched / elapsed);
 
     if (foundTarget) {
-        printf("  Target (64, 333) found: YES with %lu seeds\n", (unsigned long)targetSeeds);
+        printf("  Target (%d, %d) found: YES with %lu seeds\n", targetX, targetZ, (unsigned long)targetSeeds);
 
-        // Verify the known seed was found
-        uint64_t knownSeed = 98429062619012ULL;
         bool knownValid = hostCheckPattern(knownSeed, targetX, targetZ);
         printf("  Known seed %llu verification: %s\n",
                (unsigned long long)knownSeed,
                knownValid ? "VALID" : "INVALID");
     } else {
-        printf("  Target (64, 333) found: NO (unexpected!)\n");
+        printf("  Target (%d, %d) found: NO (unexpected!)\n", targetX, targetZ);
     }
 
     printf("\nTest complete.\n");
@@ -1444,7 +1454,7 @@ int main(int argc, char** argv) {
             printf("Usage: %s [--test] [--radius N] [--start X Z]\n", argv[0]);
             printf("\nOptimized Hensel + K-Stride: finds lower-bit roots, then uses k-stride optimization.\n");
             printf("K-stride optimization: valid k values satisfy k ≡ offset (mod %llu)\n", (unsigned long long)K_STRIDE);
-            printf("This reduces enumeration from 2^%d to 2^%d per root (~%llux speedup).\n", 
+            printf("This reduces enumeration from 2^%d to 2^%d per root (~%llux speedup).\n",
                    UPPER_BITS, UPPER_BITS - K_STRIDE_BITS, (unsigned long long)K_STRIDE);
             printf("\nOptions:\n");
             printf("  --test      Run tests\n");
@@ -1494,7 +1504,7 @@ int main(int argc, char** argv) {
     }
 
     printf("Pattern: %dx%d (%d constraints)\n", PATTERN_SIZE, PATTERN_SIZE, NUM_CONSTRAINTS);
-    printf("Method: Hensel + K-Stride (roots at %d bits, k-stride=%llu, ~%llux speedup)\n", 
+    printf("Method: Hensel + K-Stride (roots at %d bits, k-stride=%llu, ~%llux speedup)\n",
            ROOT_BITS, (unsigned long long)K_STRIDE, (unsigned long long)K_STRIDE);
     if (searchRadius <= 0) {
         printf("Search radius: unlimited\n");
